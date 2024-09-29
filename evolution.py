@@ -3,12 +3,14 @@ import logging
 import random
 import numpy as np
 import math
+import time
 
 # Initialize pygame
 pygame.init()
 
 # Constants
-WIDTH, HEIGHT = 1280, 720
+
+WIDTH, HEIGHT = 1200, 750 # Reduced screen size for better windowed mode experience
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 RED = (255, 0, 0)
@@ -34,8 +36,10 @@ logging.basicConfig(filename='simulation_log.txt', level=logging.INFO, format='%
 
 
 # Screen setup
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+screen = pygame.display.set_mode((WIDTH, HEIGHT))  # Removed RESIZABLE flag
 pygame.display.set_caption("Evolutionary Neural Network Animals with DNA")
+
+
 
 
 # Neural Network (Simple Feed-forward Network)
@@ -59,31 +63,34 @@ class NeuralNetwork:
 # Animal class with DNA
 # Updated Animal class with detect_food method
 class Animal:
-    def __init__(self, x, y, dna=None, genome="normal"):
+    def __init__(self, x, y, dna=None):
         self.x = x
         self.y = y
-        self.radius = ANIMAL_RADIUS
+        self.radius = ANIMAL_RADIUS // 2  # Reduce size to fit larger game field
         self.color = (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255))
         self.angle = random.uniform(0, 360)
         self.velocity = 0
         self.rotation_speed = 0
-        self.nn = NeuralNetwork()
+        self.nn = None
         self.hunger = 2.0
         self.fruits_eaten = 0
-        self.genome = genome
-        self.is_carnivore = genome == "carnivore"
+        self.is_carnivore = False  # Disable carnivores for now
 
         # DNA Attributes
         if dna:
             self.dna = dna
         else:
             self.dna = {
-                "speed": random.uniform(5, 15),  # Maximum speed
-                "vision_range": random.uniform(100, 250),  # Detection range, now variable in DNA
-                "eye_vision_length": random.uniform(20, 50),  # Length of the line showing eye vision
-                "reproduction_threshold": random.uniform(REPRODUCTION_THRESHOLD, REPRODUCTION_THRESHOLD + 5),
+                "speed": random.uniform(5, 10),  # Maximum speed, smaller for fitting the larger field
+                "vision_range": random.uniform(50, 150),  # Vision range now smaller for field scaling
+                "eye_vision_length": random.uniform(10, 30),  # Length of vision line
+                "reproduction_threshold": random.uniform(REPRODUCTION_THRESHOLD, REPRODUCTION_THRESHOLD + 2.5),
                 "mutation_rate": 0.1,  # Probability of mutation affecting DNA
+                "hidden_neurons": random.randint(2, 5)  # Number of hidden neurons now part of DNA
             }
+
+        # Initialize Neural Network with updated input structure and variable hidden neurons
+        self.nn = NeuralNetwork(input_size=4, hidden_size=self.dna["hidden_neurons"], output_size=3)
 
     def rotate(self, rotation):
         max_rotation_speed = 5
@@ -93,9 +100,6 @@ class Animal:
 
     def move(self):
         max_velocity = self.dna["speed"]
-        if self.is_carnivore:
-            max_velocity += 5  # Carnivores are generally faster
-
         self.velocity = max(min(self.velocity, max_velocity), -max_velocity)
 
         radians = math.radians(self.angle)
@@ -107,25 +111,72 @@ class Animal:
         if self.y - self.radius < 0: self.y = self.radius
         if self.y + self.radius > HEIGHT: self.y = HEIGHT - self.radius
 
-    def detect_food(self, food_items, animals):
-        eye_x = self.x + math.cos(math.radians(self.angle)) * self.dna["vision_range"]
-        eye_y = self.y + math.sin(math.radians(self.angle)) * self.dna["vision_range"]
-        detected_food = None
-        detected_animal = None
+    def detect_colors(self, screen):
+        """Detect RGB colors in front of the animal to simulate vision."""
+        eye_x = int(self.x + math.cos(math.radians(self.angle)) * self.dna["vision_range"])
+        eye_y = int(self.y + math.sin(math.radians(self.angle)) * self.dna["vision_range"])
 
-        if not self.is_carnivore:
-            for food in food_items:
-                if math.hypot(food.rect.centerx - self.x, food.rect.centery - self.y) < self.dna["vision_range"]:
-                    detected_food = food
-                    break
+        # Ensure coordinates are within screen bounds
+        if 0 <= eye_x < WIDTH and 0 <= eye_y < HEIGHT:
+            # Get the RGB color at the detected position
+            detected_color = screen.get_at((eye_x, eye_y))[:3]
+        else:
+            detected_color = (0, 0, 0)  # Default to black if out of bounds
 
-        if self.is_carnivore:
-            for animal in animals:
-                if animal != self and math.hypot(self.x - animal.x, self.y - animal.y) < self.dna["vision_range"]:
-                    detected_animal = animal
-                    break
+        return detected_color
 
-        return detected_food, detected_animal
+    # Animal class update modifications for focused profiling logging
+    def update(self, food_items, animals, delta_time, game_speed_factor, screen):
+        start_time = time.time()  # Start timing the update process
+
+        # Hunger processing
+        passive_hunger_cost = PASSIVE_HUNGER_DECAY * game_speed_factor * (delta_time / 1000.0)
+        hunger_cost = abs(self.velocity) * HUNGER_DECAY_RATE * game_speed_factor * (delta_time / 1000.0)
+        total_hunger_loss = hunger_cost + passive_hunger_cost
+        self.hunger -= total_hunger_loss
+
+        if self.hunger <= 0:
+            return False
+
+        # Detect RGB colors in front of the animal
+        detect_start = time.time()
+        r, g, b = self.detect_colors(screen)
+        detect_time = time.time() - detect_start
+        logging.info(f"Time for color detection: {detect_time:.4f} seconds")
+
+        # Feedforward in the neural network
+        nn_start = time.time()
+        inputs = np.array([r / 255.0, g / 255.0, b / 255.0, self.hunger])
+        output = self.nn.forward(inputs)
+        nn_time = time.time() - nn_start
+        logging.info(f"Time for neural network processing: {nn_time:.4f} seconds")
+
+        # Update movement and rotation
+        self.velocity = output[0]
+        rotation = output[1]
+        speed_factor = output[2]
+
+        move_start = time.time()
+        self.rotate(rotation)
+        self.move()
+        move_time = time.time() - move_start
+        logging.info(f"Time for movement and rotation: {move_time:.4f} seconds")
+
+        # Handle collisions
+        collision_start = time.time()
+        self.handle_collision(animals)
+        collision_time = time.time() - collision_start
+        logging.info(f"Time for collision handling: {collision_time:.4f} seconds")
+
+        # Reproduction condition
+        if self.hunger >= self.dna["reproduction_threshold"]:
+            logging.info(f"Animal at ({self.x}, {self.y}) is reproducing. Hunger level: {self.hunger}")
+            self.reproduce(animals)
+
+        total_time = time.time() - start_time
+        logging.info(f"Total time for update of animal at ({self.x}, {self.y}): {total_time:.4f} seconds")
+
+        return True
 
     def handle_collision(self, animals):
         for animal in animals:
@@ -139,69 +190,10 @@ class Animal:
                     animal.x += overlap / 2 * math.cos(angle_between)
                     animal.y += overlap / 2 * math.sin(angle_between)
 
-                    if self.is_carnivore and overlap > 0:
-                        logging.info(f"Carnivore at ({self.x}, {self.y}) ate another animal.")
-                        self.eat_animal(animals, animal)
-
-    def update(self, food_items, animals, delta_time, game_speed_factor):
-        # Calculate passive hunger cost
-        passive_hunger_cost = PASSIVE_HUNGER_DECAY * game_speed_factor * (delta_time / 1000.0)
-        movement_penalty = CARNIVORE_MOVEMENT_PENALTY if self.is_carnivore else 1.0
-        hunger_cost = abs(self.velocity) * HUNGER_DECAY_RATE * movement_penalty * game_speed_factor * (delta_time / 1000.0)
-        total_hunger_loss = hunger_cost + passive_hunger_cost
-        self.hunger -= total_hunger_loss
-
-        # Check if the animal has died from hunger
-        if self.hunger <= 0:
-            logging.info(f"Animal at ({self.x}, {self.y}) died due to hunger.")
-            return False
-
-        detected_food, detected_animal = self.detect_food(food_items, animals)
-        if detected_food:
-            logging.info(f"Animal at ({self.x}, {self.y}) detected food at ({detected_food.rect.centerx}, {detected_food.rect.centery})")
-        if detected_animal:
-            logging.info(f"Carnivore at ({self.x}, {self.y}) detected another animal at ({detected_animal.x}, {detected_animal.y})")
-
-        food_detected = 1 if detected_food else 0
-        animal_detected = 1 if detected_animal else 0
-        inputs = np.array([food_detected, animal_detected, self.x, self.y])
-
-        output = self.nn.forward(inputs)
-        self.velocity = output[0]
-        rotation = output[1]
-        speed_factor = output[2]
-
-        self.rotate(rotation)
-        self.move()
-        self.velocity *= speed_factor
-        self.handle_collision(animals)
-
-        # Check for collision with food
-        if not self.is_carnivore:
-            for food in food_items[:]:
-                if math.hypot(self.x - food.rect.centerx, self.y - food.rect.centery) < self.radius:
-                    self.eat_fruit()
-                    food_items.remove(food)
-
-        # Reproduction condition
-        if self.hunger >= self.dna["reproduction_threshold"]:
-            logging.info(f"Animal at ({self.x}, {self.y}) is reproducing. Hunger level: {self.hunger}")
-            self.reproduce(animals)
-
-        return True
-
-
     def eat_fruit(self):
-        if not self.is_carnivore:
-            self.hunger += 1.0
-            self.fruits_eaten += 1
-            logging.info(f"Animal at ({self.x}, {self.y}) ate fruit. Hunger increased to {self.hunger}")
-
-    def eat_animal(self, animals, target_animal):
-        if target_animal in animals:
-            animals.remove(target_animal)
-            self.hunger += CARNIVORE_EAT_HUNGER_GAIN
-            logging.info(f"Carnivore at ({self.x}, {self.y}) ate another animal. Hunger increased to {self.hunger}")
+        self.hunger += 1.0
+        self.fruits_eaten += 1
+        logging.info(f"Animal at ({self.x}, {self.y}) ate fruit. Hunger increased to {self.hunger}")
 
     def reproduce(self, animals):
         if self.hunger >= REPRODUCTION_HUNGER_COST:
@@ -211,9 +203,12 @@ class Animal:
             new_dna = self.dna.copy()
             for key in new_dna:
                 if random.random() < new_dna["mutation_rate"]:
-                    new_dna[key] += random.uniform(-1, 1)  # Slight mutation
+                    if key == "hidden_neurons":
+                        new_dna[key] = max(2, new_dna[key] + random.randint(-1, 1))  # Mutate number of hidden neurons
+                    else:
+                        new_dna[key] += random.uniform(-1, 1)  # Slight mutation for other attributes
 
-            new_animal = Animal(random.randint(0, WIDTH - ANIMAL_RADIUS * 2), random.randint(0, HEIGHT - ANIMAL_RADIUS * 2), dna=new_dna, genome=self.genome)
+            new_animal = Animal(random.randint(0, WIDTH - ANIMAL_RADIUS * 2), random.randint(0, HEIGHT - ANIMAL_RADIUS * 2), dna=new_dna)
             new_animal.nn.copy_from(self.nn)
             new_animal.nn.mutate()
 
@@ -242,7 +237,39 @@ class Animal:
         line_x = int(eye_x + line_length * math.cos(radians))
         line_y = int(eye_y + line_length * math.sin(radians))
         pygame.draw.line(screen, eye_color, (eye_x, eye_y), (line_x, line_y), 2)
+class NeuralNetwork:
+    def __init__(self, input_size, hidden_size, output_size):
+        # Initialize weights for input to hidden layer and hidden to output layer
+        self.weights_input_hidden = np.random.randn(input_size, hidden_size)
+        self.weights_hidden_output = np.random.randn(hidden_size, output_size)
+        self.bias_hidden = np.random.randn(hidden_size)
+        self.bias_output = np.random.randn(output_size)
 
+    def forward(self, inputs):
+        # Input to hidden layer
+        hidden = np.dot(inputs, self.weights_input_hidden) + self.bias_hidden
+        hidden_activation = self.sigmoid(hidden)  # Activation function
+
+        # Hidden to output layer
+        output = np.dot(hidden_activation, self.weights_hidden_output) + self.bias_output
+        return output
+
+    def mutate(self):
+        mutation_strength = 0.1
+        self.weights_input_hidden += mutation_strength * np.random.randn(*self.weights_input_hidden.shape)
+        self.weights_hidden_output += mutation_strength * np.random.randn(*self.weights_hidden_output.shape)
+        self.bias_hidden += mutation_strength * np.random.randn(*self.bias_hidden.shape)
+        self.bias_output += mutation_strength * np.random.randn(*self.bias_output.shape)
+
+    def copy_from(self, other):
+        self.weights_input_hidden = np.copy(other.weights_input_hidden)
+        self.weights_hidden_output = np.copy(other.weights_hidden_output)
+        self.bias_hidden = np.copy(other.bias_hidden)
+        self.bias_output = np.copy(other.bias_output)
+
+    @staticmethod
+    def sigmoid(x):
+        return 1 / (1 + np.exp(-x))  # Sigmoid activation function to introduce non-linearity
 
 # Food class
 class Food:
@@ -266,59 +293,49 @@ def spawn_best_animals(animals):
             best_animals = sorted(animals, key=lambda animal: animal.hunger, reverse=True)[:5]
 
             for best_animal in best_animals:
-                new_animal = Animal(random.randint(0, WIDTH - ANIMAL_RADIUS * 2), random.randint(0, HEIGHT - ANIMAL_RADIUS * 2), dna=best_animal.dna.copy(), genome=best_animal.genome)
+                # Only spawn herbivores
+                new_animal = Animal(random.randint(0, WIDTH - ANIMAL_RADIUS * 2), random.randint(0, HEIGHT - ANIMAL_RADIUS * 2), dna=best_animal.dna.copy())
                 new_animal.nn.copy_from(best_animal.nn)
                 new_animal.nn.mutate()
                 animals.append(new_animal)
 
-# Game loop with speed control
+
 def game_loop():
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 24)
 
-    animals = [Animal(random.randint(0, WIDTH - ANIMAL_RADIUS * 2), random.randint(0, HEIGHT - ANIMAL_RADIUS * 2), genome=random.choice(["normal", "carnivore"])) for _ in range(ANIMAL_COUNT)]
+    # Initialize animals and food
+    animals = [Animal(random.randint(0, WIDTH - ANIMAL_RADIUS * 2), random.randint(0, HEIGHT - ANIMAL_RADIUS * 2)) for _ in range(ANIMAL_COUNT)]
     food_items = []
 
+    # Timer to spawn food at regular intervals
     pygame.time.set_timer(pygame.USEREVENT, FOOD_SPAWN_INTERVAL)
 
-    # Slider settings
-    fps_slider_rect = pygame.Rect(10, 10, 20, 200)
+    # Slider settings (positioned visibly on the top right corner of the screen)
+    slider_width, slider_height = 20, 200
+    fps_slider_rect = pygame.Rect(WIDTH - 50 - slider_width, 50, slider_width, slider_height)  # Slider at the top right
     fps_value = FPS_DEFAULT
     game_speed_factor = 1.0
     simulation_time = 0  # Initialize simulation time
 
     running = True
     while running:
-        screen.fill(BLACK)
         delta_time = clock.tick(fps_value) / 1000 * game_speed_factor
         simulation_time += delta_time  # Increment simulation time with delta_time scaled by game speed factor
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            if event.type == pygame.USEREVENT:
-                if random.random() < game_speed_factor:
-                    food_x = random.randint(0, WIDTH - FOOD_SIZE)
-                    food_y = random.randint(0, HEIGHT - FOOD_SIZE)
-                    food_items.append(Food(food_x, food_y, FOOD_SIZE))
+        # Get the current FPS
+        current_fps = clock.get_fps()
+        target_fps = fps_value
 
-            if event.type == pygame.MOUSEBUTTONDOWN or event.type == pygame.MOUSEMOTION:
-                if fps_slider_rect.collidepoint(event.pos):
-                    # Calculate FPS value and game speed factor based on slider position
-                    fps_value = FPS_MIN + (FPS_MAX - FPS_MIN) * (event.pos[1] - fps_slider_rect.y) / fps_slider_rect.height
-                    fps_value = int(max(FPS_MIN, min(FPS_MAX, fps_value)))
-                    game_speed_factor = 1 + 9 * ((fps_value - FPS_MIN) / (FPS_MAX - FPS_MIN))  # Scale from 1x to 10x
+        # Logging both actual FPS and target FPS
+        logging.info(f"Actual FPS: {current_fps:.2f}, Target FPS: {target_fps}")
 
-                    # Log the current FPS value and game speed factor
-                    logging.info(f"Slider adjusted: FPS = {fps_value}, Game Speed Factor = x{game_speed_factor:.2f}")
+        # Clear the screen
+        screen.fill(BLACK)
 
-        # Draw FPS slider
-        pygame.draw.rect(screen, WHITE, fps_slider_rect)
-        pygame.draw.rect(screen, RED, (fps_slider_rect.x, fps_slider_rect.y, fps_slider_rect.width, (fps_value - FPS_MIN) * fps_slider_rect.height / (FPS_MAX - FPS_MIN)))
-
-        # Draw simulation timer on the left
-        sim_time_text = font.render(f"Time: {simulation_time:.2f} s", True, WHITE)
-        screen.blit(sim_time_text, (10, fps_slider_rect.bottom + 10))
+        # Draw FPS slider at the top right corner
+        pygame.draw.rect(screen, WHITE, fps_slider_rect)  # Draw slider background
+        pygame.draw.rect(screen, RED, (fps_slider_rect.x, fps_slider_rect.y, fps_slider_rect.width, (fps_value - FPS_MIN) * fps_slider_rect.height / (FPS_MAX - FPS_MIN)))  # Draw slider value
 
         # Draw speed indicators on the slider from x1 to x10
         for i in range(1, 11):  # Indicators for x1 to x10
@@ -326,16 +343,52 @@ def game_loop():
             speed_text = font.render(f"x{i}", True, WHITE)
             screen.blit(speed_text, (fps_slider_rect.right + 5, indicator_y - speed_text.get_height() // 2))
 
+        # Display simulation timer and FPS information on screen
+        sim_time_text = font.render(f"Time: {simulation_time:.2f} s", True, WHITE)
+        actual_fps_text = font.render(f"Actual FPS: {int(current_fps)}", True, WHITE)
+        target_fps_text = font.render(f"Target FPS: {int(target_fps)}", True, WHITE)
+
+        # Display timer and FPS counters at a visible position
+        screen.blit(sim_time_text, (10, 10))  # Timer at the top left
+        screen.blit(actual_fps_text, (10, 35))  # Actual FPS below timer
+        screen.blit(target_fps_text, (10, 60))  # Target FPS below actual FPS
+
+        # Handle events
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.USEREVENT:
+                # Adjust food spawning to match new screen size (left and right halves)
+                if random.random() < game_speed_factor:
+                    # Spawn food on the left half densely
+                    food_x = random.randint(0, WIDTH // 2 - FOOD_SIZE)
+                    food_y = random.randint(0, HEIGHT - FOOD_SIZE)
+                    food_items.append(Food(food_x, food_y, FOOD_SIZE))
+
+                if random.random() < game_speed_factor * 0.5:
+                    # Spawn food on the right half less frequently and smaller in size
+                    food_x = random.randint(WIDTH // 2, WIDTH - FOOD_SIZE)
+                    food_y = random.randint(0, HEIGHT - FOOD_SIZE)
+                    food_items.append(Food(food_x, food_y, FOOD_SIZE // 2))
+
+            # Handle FPS slider adjustments
+            if event.type == pygame.MOUSEBUTTONDOWN or (event.type == pygame.MOUSEMOTION and event.buttons[0]):
+                if fps_slider_rect.collidepoint(event.pos):
+                    # Calculate FPS value and game speed factor based on slider position
+                    fps_value = FPS_MIN + (FPS_MAX - FPS_MIN) * (event.pos[1] - fps_slider_rect.y) / fps_slider_rect.height
+                    fps_value = int(max(FPS_MIN, min(FPS_MAX, fps_value)))
+                    game_speed_factor = 1 + 9 * ((fps_value - FPS_MIN) / (FPS_MAX - FPS_MIN))
+
+        # Update animals
         alive_animals = []
         for animal in animals:
-            if animal.update(food_items, animals, delta_time, game_speed_factor):
+            if animal.update(food_items, animals, delta_time, game_speed_factor, screen):
                 alive_animals.append(animal)
                 animal.draw(screen, font)
-            else:
-                food_items.append(Food(int(animal.x), int(animal.y), FOOD_SIZE))
 
         animals = alive_animals
 
+        # Spawn best animals if population drops below 5
         spawn_best_animals(animals)
 
         # Herbivores eating food
@@ -354,9 +407,6 @@ def game_loop():
         pygame.display.flip()
 
     pygame.quit()
-
-
-
 
 
 # Run the game
